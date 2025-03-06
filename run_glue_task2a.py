@@ -23,6 +23,7 @@ import logging
 import os
 import random
 import timeit
+import csv
 
 import numpy as np
 import torch
@@ -69,10 +70,9 @@ def set_seed(args):
 
 
 def train(args, train_dataset, model, tokenizer):
-    """ Train the model """
     times = []
     losses = []
-
+    """ Train the model """
     args.train_batch_size = args.per_device_train_batch_size
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
@@ -137,12 +137,27 @@ def train(args, train_dataset, model, tokenizer):
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
+
+                for param in model.parameters():
+                    if param.grad is not None:
+                        gather_list = [torch.zeros_like(param.grad) for _ in range(args.world_size)]
+                        torch.distributed.gather(param.grad, gather_list=gather_list if args.local_rank == 0 else None, dst=0)
+                        
+                        if args.local_rank == 0:
+                            avg_grad = sum(gather_list) / args.world_size
+                        else:
+                            avg_grad = torch.zeros_like(param.grad)
+                        
+                        scatter_list = [avg_grad for _ in range(args.world_size)]    
+                        torch.distributed.scatter(param.grad, scatter_list= scatter_list if args.local_rank == 0 else None, src=0)
+                        
                 ##################################################
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
-            # logger.info("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
             losses.append(loss.item())
+            # logger.info("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
+            # print("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 ##################################################
@@ -152,9 +167,10 @@ def train(args, train_dataset, model, tokenizer):
                 scheduler.step() # Update learning rate schedule
                 model.zero_grad()
                 global_step += 1
-
+            
             stop = timeit.default_timer()
             # logger.info("  Step %d: Time = %.4f  ", (step + 1), (stop - start))
+            # print("  Step %d: Time = %.4f  ", (step + 1), (stop - start))
             times.append(stop - start)
 
             if args.max_steps > 0 and global_step > args.max_steps:
@@ -369,7 +385,7 @@ def main():
                         help="Master IP for or distributed training.")
     parser.add_argument("--master_port", type=str, default="",
                         help="Master port for or distributed training.")
-    
+
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -427,9 +443,7 @@ def main():
     model.to(args.device)
 
     logger.info("Training/evaluation parameters %s", args)
-    
-    # Wrap up model
-    model = torch.nn.parallel.DistributedDataParallel(model)
+
 
     # Training
     if args.do_train:

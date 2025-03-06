@@ -22,7 +22,6 @@ import glob
 import logging
 import os
 import random
-import timeit
 
 import numpy as np
 import torch
@@ -70,8 +69,6 @@ def set_seed(args):
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
-    times = []
-    losses = []
 
     args.train_batch_size = args.per_device_train_batch_size
     train_sampler = RandomSampler(train_dataset)
@@ -116,7 +113,6 @@ def train(args, train_dataset, model, tokenizer):
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
-            start = timeit.default_timer()
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {'input_ids':      batch[0],
@@ -141,8 +137,9 @@ def train(args, train_dataset, model, tokenizer):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
-            # logger.info("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
-            losses.append(loss.item())
+            # Log loss for the first five minibatches
+            if step < 5:
+                logger.info("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 ##################################################
@@ -152,10 +149,6 @@ def train(args, train_dataset, model, tokenizer):
                 scheduler.step() # Update learning rate schedule
                 model.zero_grad()
                 global_step += 1
-
-            stop = timeit.default_timer()
-            # logger.info("  Step %d: Time = %.4f  ", (step + 1), (stop - start))
-            times.append(stop - start)
 
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -168,10 +161,6 @@ def train(args, train_dataset, model, tokenizer):
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
         results = evaluate(args, model, tokenizer)
         ##################################################
-    filename = f"/proj/cos568proj2-PG0/groups/rm9688/COS568-DistLM-SP25/results/node_{args.local_rank}.csv"
-    with open(filename, 'wb') as myfile:
-        wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
-        wr.writerow(mylist)
 
     return global_step, tr_loss / global_step
 
@@ -363,13 +352,6 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
-    parser.add_argument("--world_size", type=int, default=1,
-                        help="For distributed training: world_size. If single-node training, world_size defaults to 1.")
-    parser.add_argument("--master_ip", type=str, default="",
-                        help="Master IP for or distributed training.")
-    parser.add_argument("--master_port", type=str, default="",
-                        help="Master port for or distributed training.")
-    
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -398,14 +380,6 @@ def main():
     label_list = processor.get_labels()
     num_labels = len(label_list)
 
-    # Prepare distributed training
-    torch.distributed.init_process_group(
-        backend='gloo', # for cpu
-        init_method=f"tcp://{args.master_ip}:{args.master_port}", # "tcp://{master_ip}:{master_port}"
-        world_size=args.world_size, # Number of nodes (4 in our experiments)
-        rank=args.local_rank, # 0, 1, 2, 3
-    )
-
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
@@ -427,9 +401,7 @@ def main():
     model.to(args.device)
 
     logger.info("Training/evaluation parameters %s", args)
-    
-    # Wrap up model
-    model = torch.nn.parallel.DistributedDataParallel(model)
+
 
     # Training
     if args.do_train:

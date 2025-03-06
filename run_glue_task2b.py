@@ -70,9 +70,6 @@ def set_seed(args):
 
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
-    times = []
-    losses = []
-
     args.train_batch_size = args.per_device_train_batch_size
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
@@ -137,12 +134,16 @@ def train(args, train_dataset, model, tokenizer):
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
+
+                for param in model.parameters():
+                    if param.grad is not None:
+                        torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.SUM)
+                        param.grad /= args.world_size 
                 ##################################################
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
-            # logger.info("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
-            losses.append(loss.item())
+            logger.info("  Step %d: Loss = %.4f  ", (step + 1), loss.item())
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 ##################################################
@@ -154,8 +155,7 @@ def train(args, train_dataset, model, tokenizer):
                 global_step += 1
 
             stop = timeit.default_timer()
-            # logger.info("  Step %d: Time = %.4f  ", (step + 1), (stop - start))
-            times.append(stop - start)
+            logger.info("  Step %d: Time = %.4f  ", (step + 1), (stop - start))
 
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -168,10 +168,6 @@ def train(args, train_dataset, model, tokenizer):
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
         results = evaluate(args, model, tokenizer)
         ##################################################
-    filename = f"/proj/cos568proj2-PG0/groups/rm9688/COS568-DistLM-SP25/results/node_{args.local_rank}.csv"
-    with open(filename, 'wb') as myfile:
-        wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
-        wr.writerow(mylist)
 
     return global_step, tr_loss / global_step
 
@@ -369,7 +365,7 @@ def main():
                         help="Master IP for or distributed training.")
     parser.add_argument("--master_port", type=str, default="",
                         help="Master port for or distributed training.")
-    
+
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -427,9 +423,7 @@ def main():
     model.to(args.device)
 
     logger.info("Training/evaluation parameters %s", args)
-    
-    # Wrap up model
-    model = torch.nn.parallel.DistributedDataParallel(model)
+
 
     # Training
     if args.do_train:
